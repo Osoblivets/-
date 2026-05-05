@@ -1,30 +1,25 @@
 import os
+import asyncio
+import logging
+import feedparser
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
+from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+from apscheduler.schedulers.background import BackgroundScheduler
+from openai import OpenAI
+
+# ========================
+# 🔑 КОНФІГУРАЦІЯ
+# ========================
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
 
-import feedparser
-import asyncio
-import logging
-from datetime import datetime, timedelta
-
-from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
-
-from apscheduler.schedulers.background import BackgroundScheduler
-from openai import OpenAI
-
-# ========================
-# 🔑 КЛЮЧІ
-
-
 logging.basicConfig(level=logging.INFO)
-
-from openai import OpenAI
 
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
@@ -33,9 +28,6 @@ client = OpenAI(
 
 news_storage = []
 
-# ========================
-# RSS
-# ========================
 RSS_FEEDS = [
     "https://mmr.ua/rss",
     "https://sostav.ua/rss/news.xml",
@@ -44,7 +36,6 @@ RSS_FEEDS = [
     "https://news.google.com/rss/search?q=маркетинг+SMM+Instagram+TikTok&hl=uk&gl=UA&ceid=UA:uk",
 ]
 
-# 🎯 ЧІТКИЙ ФІЛЬТР (тільки маркетинг і соцмережі)
 KEYWORDS = [
     "маркетинг", "реклама", "smm", "таргет", "контент",
     "instagram", "tiktok", "facebook", "youtube", "linkedin",
@@ -52,7 +43,7 @@ KEYWORDS = [
 ]
 
 # ========================
-# AI
+# 🤖 AI ЛОГІКА
 # ========================
 def ai_request(prompt):
     try:
@@ -66,47 +57,38 @@ def ai_request(prompt):
         logging.warning(f"AI error: {e}")
         return None
 
-
 async def ai_async(prompt):
     return await asyncio.to_thread(ai_request, prompt)
 
-
 def prompt_template(title):
-    return f"""Перепиши новину простою українською.
+    return f"""Перепиши новину простою українською мовою.
 
 Формат:
-ЗАГОЛОВОК: коротко
-ОПИС: 1 коротке речення людською мовою
+ЗАГОЛОВОК: Одне коротке речення, що починається з ключового слова (наприклад: Аналіз, Оцінка, Запуск, Оновлення)
+ОПИС: 1 коротке речення про суть новини людською мовою.
 
 Новина:
 {title}
 """
 
 # ========================
-# FILTER
+# 🔍 ФІЛЬТРАЦІЯ ТА RSS
 # ========================
 def is_relevant(title):
     return any(k in title.lower() for k in KEYWORDS)
 
-# ========================
-# FETCH
-# ========================
 def fetch_news():
     global news_storage
-
     today = datetime.now().date()
     yesterday = today - timedelta(days=1)
-
     new_items = []
 
     for url in RSS_FEEDS:
         try:
             feed = feedparser.parse(url)
-
             for entry in feed.entries[:20]:
                 if not is_relevant(entry.title):
                     continue
-
                 if any(n["link"] == entry.link for n in news_storage):
                     continue
 
@@ -117,10 +99,8 @@ def fetch_news():
                     "title_ua": None,
                     "summary_ua": None,
                 }
-
                 new_items.append(item)
                 news_storage.append(item)
-
         except Exception as e:
             logging.error(f"RSS error: {e}")
 
@@ -128,7 +108,7 @@ def fetch_news():
     return new_items
 
 # ========================
-# AI PROCESS
+# ⚙️ ОБРОБКА ТЕКСТУ
 # ========================
 sem = asyncio.Semaphore(5)
 
@@ -144,40 +124,45 @@ async def process_one(item):
     try:
         for line in result.splitlines():
             if line.startswith("ЗАГОЛОВОК:"):
-                item["title_ua"] = line.split(":",1)[1].strip()
+                item["title_ua"] = line.split(":", 1)[1].strip()
             elif line.startswith("ОПИС:"):
-                item["summary_ua"] = line.split(":",1)[1].strip()
+                item["summary_ua"] = line.split(":", 1)[1].strip()
     except:
         item["title_ua"] = item["title"]
         item["summary_ua"] = ""
-
 
 async def process_news(items):
     await asyncio.gather(*(process_one(i) for i in items[:30]))
 
 # ========================
-# HELPERS
+# 📝 ФОРМАТУВАННЯ (ЗМІНЕНО)
 # ========================
-def get_news(date):
-    return [n for n in news_storage if n["date"] == date]
-
 def format_list(items):
     if not items:
         return "📭 Нема новин"
 
     text = ""
-
-    for n in items[:15]:
+    for i, n in enumerate(items[:15], 1):
         title = n.get("title_ua") or n["title"]
         summary = n.get("summary_ua") or ""
         link = n["link"]
 
-        text += f"[{title}]({link}) - {summary}\n\n"
+        # Розділяємо заголовок на перше слово та все інше
+        parts = title.split(" ", 1)
+        
+        if len(parts) > 1:
+            first_word = parts[0]
+            rest_of_title = parts[1]
+            # Формат: 1. [Слово](посилання) решта — опис
+            text += f"{i}. [{first_word}]({link}) {rest_of_title} — {summary}\n\n"
+        else:
+            # На випадок, якщо заголовок складається лише з одного слова
+            text += f"{i}. [{title}]({link}) — {summary}\n\n"
 
     return text.strip()
 
 # ========================
-# MENU
+# 📱 ТЕЛЕГРАМ ІНТЕРФЕЙС
 # ========================
 def menu():
     return InlineKeyboardMarkup([
@@ -187,20 +172,19 @@ def menu():
         [InlineKeyboardButton("🔄 Оновити", callback_data="refresh")]
     ])
 
-# ========================
-# SEND
-# ========================
 async def send_digest(chat_id=None):
     chat_id = chat_id or CHAT_ID
+    if not chat_id:
+        logging.error("CHAT_ID is not defined")
+        return
 
     new = fetch_news()
     await process_news(new)
 
     today = datetime.now().date()
-    items = get_news(today)
+    items = [n for n in news_storage if n["date"] == today]
 
     bot = Bot(token=TELEGRAM_TOKEN)
-
     await bot.send_message(
         chat_id,
         format_list(items),
@@ -209,9 +193,6 @@ async def send_digest(chat_id=None):
         reply_markup=menu()
     )
 
-# ========================
-# CALLBACK
-# ========================
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -220,19 +201,18 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     yesterday = today - timedelta(days=1)
 
     if q.data == "today":
-        text = format_list(get_news(today))
-
+        items = [n for n in news_storage if n["date"] == today]
+        text = format_list(items)
     elif q.data == "yesterday":
-        text = format_list(get_news(yesterday))
-
+        items = [n for n in news_storage if n["date"] == yesterday]
+        text = format_list(items)
     elif q.data == "digest":
-        text = format_list(get_news(today))
-
+        items = [n for n in news_storage if n["date"] == today]
+        text = format_list(items)
     elif q.data == "refresh":
         new = fetch_news()
         await process_news(new)
         text = f"✅ Оновлено ({len(new)} новин)"
-
     else:
         text = "❓ Помилка"
 
@@ -243,9 +223,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=menu()
     )
 
-# ========================
-# COMMANDS
-# ========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Новини маркетингу та соцмереж",
@@ -257,19 +234,17 @@ async def digest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_digest(update.message.chat_id)
 
 # ========================
-# SCHEDULER
+# ⏰ ПЛАНУВАЛЬНИК ТА ЗАПУСК
 # ========================
 scheduler = BackgroundScheduler()
 
 def job():
     asyncio.run(send_digest())
 
-# ========================
-# MAIN
-# ========================
 def main():
     logging.info("🚀 Bot started")
 
+    # Первинний збір
     fetch_news()
 
     scheduler.add_job(job, "cron", hour=9, minute=0)
