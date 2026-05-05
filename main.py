@@ -61,18 +61,18 @@ async def ai_async(prompt):
     return await asyncio.to_thread(ai_request, prompt)
 
 def prompt_template(title):
-    return f"""Перепиши новину простою українською мовою.
+    return f"""Ти — професійний медіа-байєр та маркетолог. Перепиши заголовок новини.
 
-Формат:
-ЗАГОЛОВОК: Одне коротке речення, що починається з ключового слова (наприклад: Аналіз, Оцінка, Запуск, Оновлення)
-ОПИС: 1 коротке речення про суть новини людською мовою.
+СУВОРО дотримуйся формату:
+ЗАГОЛОВОК: Одне речення. Перше слово ОБОВ'ЯЗКОВО має бути головним терміном (наприклад: Оцінка, TikTok, Реклама, Оновлення, Кейс).
+ОПИС: Одне коротке, змістовне речення, яке розкриває суть новини та її користь для маркетолога.
 
-Новина:
+Новина для обробки:
 {title}
 """
 
 # ========================
-# 🔍 ФІЛЬТРАЦІЯ ТА RSS
+# 🔍 RSS ТА ФІЛЬТРАЦІЯ
 # ========================
 def is_relevant(title):
     return any(k in title.lower() for k in KEYWORDS)
@@ -86,7 +86,7 @@ def fetch_news():
     for url in RSS_FEEDS:
         try:
             feed = feedparser.parse(url)
-            for entry in feed.entries[:20]:
+            for entry in feed.entries[:25]:
                 if not is_relevant(entry.title):
                     continue
                 if any(n["link"] == entry.link for n in news_storage):
@@ -104,6 +104,7 @@ def fetch_news():
         except Exception as e:
             logging.error(f"RSS error: {e}")
 
+    # Очищуємо старі новини (старіші за вчора)
     news_storage = [n for n in news_storage if n["date"] >= yesterday]
     return new_items
 
@@ -118,51 +119,61 @@ async def process_one(item):
 
     if not result:
         item["title_ua"] = item["title"]
-        item["summary_ua"] = ""
+        item["summary_ua"] = "Деталі за посиланням."
         return
 
     try:
-        for line in result.splitlines():
-            if line.startswith("ЗАГОЛОВОК:"):
+        lines = result.splitlines()
+        for line in lines:
+            line = line.strip()
+            if line.upper().startswith("ЗАГОЛОВОК:"):
                 item["title_ua"] = line.split(":", 1)[1].strip()
-            elif line.startswith("ОПИС:"):
+            elif line.upper().startswith("ОПИС:"):
                 item["summary_ua"] = line.split(":", 1)[1].strip()
-    except:
+        
+        # Перестраховка, якщо ШІ не видав опис
+        if not item["summary_ua"]:
+            item["summary_ua"] = "Стислий огляд нових трендів та інструментів у галузі."
+            
+    except Exception as e:
+        logging.error(f"Parsing error: {e}")
         item["title_ua"] = item["title"]
-        item["summary_ua"] = ""
+        item["summary_ua"] = "Опис тимчасово недоступний."
 
 async def process_news(items):
+    if not items:
+        return
     await asyncio.gather(*(process_one(i) for i in items[:30]))
 
 # ========================
-# 📝 ФОРМАТУВАННЯ (ЗМІНЕНО)
+# 📝 ФОРМАТУВАННЯ ВИВОДУ
 # ========================
 def format_list(items):
     if not items:
-        return "📭 Нема новин"
+        return "📭 На сьогодні новин поки немає."
 
     text = ""
     for i, n in enumerate(items[:15], 1):
         title = n.get("title_ua") or n["title"]
-        summary = n.get("summary_ua") or ""
+        summary = n.get("summary_ua") or "Деталі в статті."
         link = n["link"]
 
-        # Розділяємо заголовок на перше слово та все інше
+        # Розділяємо заголовок на перше слово та решту
         parts = title.split(" ", 1)
         
         if len(parts) > 1:
-            first_word = parts[0]
+            first_word = parts[0].strip(",") # Прибираємо кому, якщо вона є
             rest_of_title = parts[1]
-            # Формат: 1. [Слово](посилання) решта — опис
+            # Формат: 1. [Слово](посилання) решта - опис
             text += f"{i}. [{first_word}]({link}) {rest_of_title} — {summary}\n\n"
         else:
-            # На випадок, якщо заголовок складається лише з одного слова
+            # Якщо заголовок — лише одне слово
             text += f"{i}. [{title}]({link}) — {summary}\n\n"
 
     return text.strip()
 
 # ========================
-# 📱 ТЕЛЕГРАМ ІНТЕРФЕЙС
+# 📱 ТЕЛЕГРАМ БОТ
 # ========================
 def menu():
     return InlineKeyboardMarkup([
@@ -174,9 +185,7 @@ def menu():
 
 async def send_digest(chat_id=None):
     chat_id = chat_id or CHAT_ID
-    if not chat_id:
-        logging.error("CHAT_ID is not defined")
-        return
+    if not chat_id: return
 
     new = fetch_news()
     await process_news(new)
@@ -200,21 +209,18 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.now().date()
     yesterday = today - timedelta(days=1)
 
-    if q.data == "today":
+    if q.data in ["today", "digest"]:
         items = [n for n in news_storage if n["date"] == today]
         text = format_list(items)
     elif q.data == "yesterday":
         items = [n for n in news_storage if n["date"] == yesterday]
         text = format_list(items)
-    elif q.data == "digest":
-        items = [n for n in news_storage if n["date"] == today]
-        text = format_list(items)
     elif q.data == "refresh":
         new = fetch_news()
         await process_news(new)
-        text = f"✅ Оновлено ({len(new)} новин)"
+        text = f"✅ Оновлено. Знайдено {len(new)} нових маркетингових подій."
     else:
-        text = "❓ Помилка"
+        text = "❓ Сталася помилка"
 
     await q.message.reply_text(
         text,
@@ -225,27 +231,31 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Новини маркетингу та соцмереж",
+        "👋 Вітаю! Я збираю найважливіші новини маркетингу, SMM та реклами.",
         reply_markup=menu()
     )
 
 async def digest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ Генерую...")
+    await update.message.reply_text("⏳ Готую свіжий дайджест...")
     await send_digest(update.message.chat_id)
 
 # ========================
-# ⏰ ПЛАНУВАЛЬНИК ТА ЗАПУСК
+# ⏰ SCHEDULER
 # ========================
 scheduler = BackgroundScheduler()
 
 def job():
-    asyncio.run(send_digest())
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(send_digest())
 
+# ========================
+# MAIN
+# ========================
 def main():
-    logging.info("🚀 Bot started")
+    logging.info("🚀 Бот запущений...")
 
-    # Первинний збір
-    fetch_news()
+    fetch_news() # Початковий збір при запуску
 
     scheduler.add_job(job, "cron", hour=9, minute=0)
     scheduler.start()
