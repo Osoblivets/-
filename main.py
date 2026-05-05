@@ -24,9 +24,11 @@ from openai import OpenAI
 
 logging.basicConfig(level=logging.INFO)
 
+from openai import OpenAI
+
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_KEY,
+    api_key=OPENROUTER_KEY
 )
 
 news_storage = []
