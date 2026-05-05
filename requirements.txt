@@ -1,0 +1,5 @@
+feedparser
+python-telegram-bot
+apscheduler
+openai
+python-dotenv
